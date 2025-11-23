@@ -1,0 +1,27 @@
+---
+- name: DC Automation - Debug Version
+  hosts: domain_controllers
+  gather_facts: no
+  
+  vars:
+    ansible_winrm_operation_timeout_sec: 120
+    ansible_winrm_read_timeout_sec: 150
+  
+  tasks:
+    - name: Test connection first
+      win_ping:
+      
+    - name: Create log directory with timeout
+      win_file:
+        path: C:\Logs
+        state: directory
+      async: 60
+      poll: 5
+    
+    - name: Verify log directory
+      win_shell: Test-Path C:\Logs
+      register: logs_exist
+    
+    - name: Show result
+      debug:
+        msg: "Logs directory exists: {{ logs_exist.stdout_lines[0] }}"

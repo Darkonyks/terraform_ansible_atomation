@@ -1,0 +1,124 @@
+---
+# Security and firewall configuration
+# Author: Darko Nedic
+
+- name: Configure Windows Firewall rules
+  win_firewall_rule:
+    name: "{{ item.name }}"
+    localport: "{{ item.localport }}"
+    protocol: "{{ item.protocol }}"
+    action: "{{ item.action }}"
+    direction: "{{ item.direction }}"
+    state: present
+    enabled: yes
+  loop: "{{ firewall_rules }}"
+
+- name: Enable Windows Firewall for all profiles
+  win_shell: |
+    netsh advfirewall set allprofiles state on
+    netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
+
+- name: Configure audit policies
+  win_shell: |
+    # Enable audit policies for security monitoring
+    auditpol /set /category:"Account Logon" /success:enable /failure:enable
+    auditpol /set /category:"Account Management" /success:enable /failure:enable
+    auditpol /set /category:"Directory Service Access" /success:enable /failure:enable
+    auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable
+    auditpol /set /category:"Object Access" /success:enable /failure:enable
+    auditpol /set /category:"Policy Change" /success:enable /failure:enable
+    auditpol /set /category:"Privilege Use" /success:enable /failure:enable
+    auditpol /set /category:"System" /success:enable /failure:enable
+  ignore_errors: yes
+
+- name: Configure password policy
+  win_shell: |
+    # Set domain password policy
+    Import-Module ActiveDirectory
+    try {
+      $DefaultDomainPolicy = Get-ADDefaultDomainPasswordPolicy
+      if ($DefaultDomainPolicy.MinPasswordLength -lt 8) {
+        Set-ADDefaultDomainPasswordPolicy -MinPasswordLength 8
+      }
+      if ($DefaultDomainPolicy.MaxPasswordAge.Days -gt 90) {
+        Set-ADDefaultDomainPasswordPolicy -MaxPasswordAge (New-TimeSpan -Days 90)
+      }
+      Set-ADDefaultDomainPasswordPolicy -PasswordHistoryCount 12
+      Set-ADDefaultDomainPasswordPolicy -ComplexityEnabled $true
+      Write-Output "Password policy configured"
+    } catch {
+      Write-Output "Error configuring password policy: $_"
+    }
+  ignore_errors: yes
+
+- name: Configure account lockout policy
+  win_shell: |
+    # Set account lockout policy
+    Import-Module ActiveDirectory
+    try {
+      Set-ADDefaultDomainPasswordPolicy -LockoutThreshold 5
+      Set-ADDefaultDomainPasswordPolicy -LockoutDuration (New-TimeSpan -Minutes 30)
+      Set-ADDefaultDomainPasswordPolicy -LockoutObservationWindow (New-TimeSpan -Minutes 30)
+      Write-Output "Account lockout policy configured"
+    } catch {
+      Write-Output "Error configuring lockout policy: $_"
+    }
+  ignore_errors: yes
+
+- name: Disable unnecessary services
+  win_service:
+    name: "{{ item }}"
+    state: stopped
+    start_mode: disabled
+  loop:
+    - Fax
+    - TapiSrv
+    - Telephony
+    - RemoteRegistry
+  ignore_errors: yes
+
+- name: Configure Windows Update settings
+  win_shell: |
+    # Configure Windows Update to download but not install automatically
+    $AUSettings = (New-Object -com "Microsoft.Update.AutoUpdate").Settings
+    $AUSettings.NotificationLevel = 2  # Notify before download
+    $AUSettings.ScheduledInstallationDay = 0  # Every day
+    $AUSettings.ScheduledInstallationTime = 3  # 3 AM
+    $AUSettings.Save()
+  ignore_errors: yes
+
+- name: Configure Event Log retention
+  win_shell: |
+    # Set event log sizes and retention
+    wevtutil sl System /ms:104857600 /rt:false
+    wevtutil sl Application /ms:104857600 /rt:false
+    wevtutil sl Security /ms:209715200 /rt:false
+    wevtutil sl "Directory Service" /ms:104857600 /rt:false
+    wevtutil sl "DNS Server" /ms:104857600 /rt:false
+  ignore_errors: yes
+
+- name: Verify and save security configuration
+  win_shell: |
+    $outputFile = "C:\Logs\security_config.txt"
+    
+    "=== FIREWALL STATUS ===" | Out-File $outputFile -Encoding UTF8
+    netsh advfirewall show allprofiles state | Out-File $outputFile -Append -Encoding UTF8
+    
+    "`n=== FIREWALL RULES (Sample) ===" | Out-File $outputFile -Append -Encoding UTF8
+    Get-NetFirewallRule | Where-Object { $_.Enabled -eq "True" -and $_.Direction -eq "Inbound" } | 
+      Select-Object DisplayName, Direction, Action -First 20 | 
+      Format-Table -AutoSize | Out-File $outputFile -Append -Encoding UTF8
+    
+    "`n=== PASSWORD POLICY ===" | Out-File $outputFile -Append -Encoding UTF8
+    Import-Module ActiveDirectory
+    Get-ADDefaultDomainPasswordPolicy | Format-List | Out-File $outputFile -Append -Encoding UTF8
+    
+    "`n=== AUDIT POLICY ===" | Out-File $outputFile -Append -Encoding UTF8
+    auditpol /get /category:* | Out-File $outputFile -Append -Encoding UTF8
+    
+    Write-Output "Security configuration saved to $outputFile"
+
+- name: Log security configuration completion
+  win_shell: |
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] Security configuration completed"

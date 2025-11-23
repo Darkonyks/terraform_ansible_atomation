@@ -1,0 +1,34 @@
+---
+- name: Simple Connection Test
+  hosts: domain_controllers
+  gather_facts: no
+  
+  tasks:
+    - name: Test basic connection
+      win_ping:
+    
+    - name: Get computer name
+      win_shell: $env:COMPUTERNAME
+      register: computer_name
+    
+    - name: Display computer name
+      debug:
+        msg: "Computer name: {{ computer_name.stdout_lines[0] }}"
+    
+    - name: Create test directory
+      win_file:
+        path: C:\Logs
+        state: directory
+    
+    - name: Write test log
+      win_shell: |
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        "[$timestamp] Ansible test successful" | Out-File "C:\Logs\ansible-test.log"
+    
+    - name: Read test log
+      win_shell: Get-Content C:\Logs\ansible-test.log
+      register: test_log
+    
+    - name: Display test log
+      debug:
+        msg: "{{ test_log.stdout_lines }}"

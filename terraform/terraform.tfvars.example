@@ -1,0 +1,36 @@
+# Example Terraform Variables File
+# Copy this file to terraform.tfvars and customize the values
+
+# AWS Configuration
+aws_region    = "us-east-1"
+instance_type = "t3a.medium"
+
+# Key Pair Configuration
+key_name        = "dc-automation-key"
+public_key_path = "./dc-automation-key.pub"
+
+# Environment
+environment = "dev"
+
+# Server Configuration
+server_name = "DC01"
+domain_name = "corp.local"
+
+# Storage
+root_volume_size = 50
+
+# Networking
+use_elastic_ip = false
+allowed_cidr_blocks = [
+  "0.0.0.0/0"  # Change this to your IP range for better security
+]
+
+# RDS Configuration (optional)
+create_rds                  = false
+rds_instance_class          = "db.t3.micro"
+rds_allocated_storage       = 20
+rds_max_allocated_storage   = 100
+rds_database_name           = "DCAutomation"
+rds_username                = "dbadmin"
+rds_password                = "YourSecureDBPassword123!"
+rds_backup_retention_period = 7

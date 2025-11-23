@@ -1,0 +1,37 @@
+---
+# Global variables for all hosts
+# Author: Darko Nedic
+
+# Default passwords (override these in production!)
+dsrm_password: "P@ssw0rd!DSRM123"
+user_password: "P@ssw0rd!1"
+
+# Timeouts and retries
+connection_timeout: 60
+command_timeout: 300
+reboot_timeout: 600
+max_retries: 3
+
+# Logging
+log_level: INFO
+enable_debug_logging: false
+
+# Windows specific settings
+ansible_shell_type: powershell
+ansible_become_method: runas
+ansible_become_user: Administrator
+
+# Common directories
+automation_dir: "C:\\Automation"
+logs_dir: "C:\\Logs"
+scripts_dir: "C:\\Scripts"
+
+# Windows Update settings
+install_critical_updates: true
+install_security_updates: true
+reboot_after_updates: false
+
+# Performance settings
+disable_defender_realtime: true
+configure_event_logs: true
+optimize_services: true

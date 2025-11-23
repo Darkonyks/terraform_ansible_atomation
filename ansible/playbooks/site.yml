@@ -1,0 +1,94 @@
+---
+# DC Automation - Main Ansible Playbook
+# Author: Darko Nedic
+# Version: 1.0
+
+- name: DC Automation - Complete Domain Controller Setup
+  hosts: domain_controllers
+  gather_facts: no
+  strategy: linear
+  serial: 1
+  max_fail_percentage: 0
+  any_errors_fatal: false
+  
+  vars:
+    # Default passwords (override in group_vars or host_vars)
+    dsrm_password: "P@ssw0rd!DSRM123"
+    user_password: "P@ssw0rd!1"
+    
+    # Installation phases
+    installation_phases:
+      - rename_server
+      - install_ad_ds
+      - promote_dc
+      - create_ou_structure
+      - create_users
+      - install_iis
+      - configure_firewall
+      - finalize_setup
+
+  pre_tasks:
+    - name: Create log directory
+      win_shell: |
+        if (-not (Test-Path "C:\Logs")) {
+          New-Item -Path "C:\Logs" -ItemType Directory -Force | Out-Null
+        }
+        Write-Output "Logs directory ready"
+    
+    - name: Log playbook start
+      win_shell: |
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] Starting DC Automation playbook"
+
+  roles:
+    - role: common
+      tags: [common, always]
+    
+    - role: domain_controller
+      tags: [domain_controller, ad]
+    
+    - role: active_directory
+      tags: [active_directory, ad, users]
+    
+    - role: iis_webserver
+      tags: [iis, web]
+    
+    - role: security
+      tags: [security, firewall]
+
+  post_tasks:
+    - name: Log playbook completion
+      win_shell: |
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] DC Automation playbook completed successfully"
+    
+    - name: Display completion message
+      debug:
+        msg: |
+          ================================
+          DC AUTOMATION COMPLETED!
+          ================================
+          Server: {{ server_name }}
+          Domain: {{ domain_name }}
+          OUs Created: {{ organizational_units | length }}
+          Users Created: {{ domain_users | length }}
+          IIS Status: Installed and Running
+          ================================
+          Access:
+          RDP: {{ ansible_host }}:3389
+          IIS: http://{{ ansible_host }}
+          ================================
+
+  handlers:
+    - name: reboot server
+      win_reboot:
+        reboot_timeout: 600
+        connect_timeout: 5
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+      
+    - name: restart iis
+      win_service:
+        name: W3SVC
+        state: restarted

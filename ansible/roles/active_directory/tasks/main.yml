@@ -1,0 +1,283 @@
+---
+# Active Directory structure and user management
+# Author: Darko Nedic
+
+- name: Verify Domain Controller prerequisites
+  win_shell: |
+    Write-Output "=== Domain Controller Status Check ==="
+    
+    # Check if AD DS is installed
+    $addsFeature = Get-WindowsFeature -Name AD-Domain-Services
+    Write-Output "AD-Domain-Services Installed: $($addsFeature.Installed)"
+    
+    # Check NTDS service (core AD service)
+    $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+    if ($ntds) {
+      Write-Output "NTDS Service Status: $($ntds.Status)"
+      Write-Output "NTDS Service StartType: $($ntds.StartType)"
+    } else {
+      Write-Output "NTDS Service: NOT FOUND - Server may not be promoted as DC"
+    }
+    
+    # Check ADWS service
+    $adws = Get-Service -Name ADWS -ErrorAction SilentlyContinue
+    if ($adws) {
+      Write-Output "ADWS Service Status: $($adws.Status)"
+      Write-Output "ADWS Service StartType: $($adws.StartType)"
+    } else {
+      Write-Output "ADWS Service: NOT FOUND"
+    }
+    
+    # Check DNS service
+    $dns = Get-Service -Name DNS -ErrorAction SilentlyContinue
+    if ($dns) {
+      Write-Output "DNS Service Status: $($dns.Status)"
+    }
+    
+    Write-Output "=== End Status Check ==="
+  register: dc_prereq_check
+  changed_when: false
+
+- name: Display DC prerequisite check results
+  debug:
+    var: dc_prereq_check.stdout_lines
+
+- name: Ensure NTDS service is running
+  win_shell: |
+    Write-Output "Checking NTDS (Active Directory Domain Services) status..."
+    
+    $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+    
+    if ($null -eq $ntds) {
+      throw "NTDS service not found. Server is not promoted as a Domain Controller."
+    }
+    
+    Write-Output "NTDS service found with status: $($ntds.Status)"
+    
+    if ($ntds.Status -ne 'Running') {
+      Write-Output "Starting NTDS service..."
+      Start-Service -Name NTDS -ErrorAction Stop
+      Start-Sleep -Seconds 10
+      $ntds = Get-Service -Name NTDS
+      Write-Output "NTDS service status after start: $($ntds.Status)"
+    }
+    
+    if ($ntds.StartType -ne 'Automatic') {
+      Write-Output "Setting NTDS to start automatically..."
+      Set-Service -Name NTDS -StartupType Automatic
+    }
+    
+    Write-Output "NTDS service is running"
+  register: ntds_check
+  retries: 3
+  delay: 30
+  until: ntds_check.rc == 0
+
+- name: Ensure ADWS service is installed and started
+  win_shell: |
+    Write-Output "Checking ADWS service status..."
+    
+    # Check if ADWS service exists
+    $adws = Get-Service -Name ADWS -ErrorAction SilentlyContinue
+    
+    if ($null -eq $adws) {
+      Write-Output "ADWS service not found - checking AD-Domain-Services feature..."
+      $addsFeature = Get-WindowsFeature -Name AD-Domain-Services
+      if (-not $addsFeature.Installed) {
+        throw "AD-Domain-Services feature is not installed. Cannot proceed."
+      }
+      Write-Output "AD-Domain-Services is installed but ADWS service not found. This may require a reboot."
+      exit 1
+    }
+    
+    Write-Output "ADWS service found with status: $($adws.Status)"
+    
+    # Start ADWS if not running
+    if ($adws.Status -ne 'Running') {
+      Write-Output "Starting ADWS service..."
+      Start-Service -Name ADWS -ErrorAction Stop
+      Start-Sleep -Seconds 5
+      $adws = Get-Service -Name ADWS
+      Write-Output "ADWS service status after start: $($adws.Status)"
+    }
+    
+    # Verify startup type
+    $adwsStartup = Get-Service -Name ADWS | Select-Object -ExpandProperty StartType
+    if ($adwsStartup -ne 'Automatic') {
+      Write-Output "Setting ADWS to start automatically..."
+      Set-Service -Name ADWS -StartupType Automatic
+    }
+    
+    Write-Output "ADWS service is ready"
+  register: adws_check
+  retries: 3
+  delay: 30
+  until: adws_check.rc == 0
+
+- name: Wait for Active Directory to be fully operational
+  win_shell: |
+    $maxAttempts = 20
+    $attempt = 0
+    $adReady = $false
+    
+    Write-Output "Waiting for Active Directory to be fully operational..."
+    
+    while (-not $adReady -and $attempt -lt $maxAttempts) {
+      $attempt++
+      Write-Output "Attempt $attempt/$maxAttempts - Testing AD connectivity..."
+      
+      try {
+        # Import AD module and test domain connectivity
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $domain = Get-ADDomain -ErrorAction Stop
+        $rootDSE = Get-ADRootDSE -ErrorAction Stop
+        
+        Write-Output "Successfully connected to domain: $($domain.DNSRoot)"
+        Write-Output "Domain functional level: $($domain.DomainMode)"
+        $adReady = $true
+      } catch {
+        Write-Output "AD not ready: $($_.Exception.Message)"
+        if ($attempt -lt $maxAttempts) {
+          Write-Output "Waiting 15 seconds before retry..."
+          Start-Sleep -Seconds 15
+        }
+      }
+    }
+    
+    if (-not $adReady) {
+      throw "Active Directory did not become operational after $maxAttempts attempts (5 minutes)"
+    }
+    
+    Write-Output "Active Directory is fully operational!"
+  register: ad_wait
+  retries: 2
+  delay: 30
+
+- name: Import Active Directory module
+  win_shell: Import-Module ActiveDirectory
+  
+- name: Get Domain Distinguished Name
+  win_shell: |
+    Import-Module ActiveDirectory
+    (Get-ADDomain).DistinguishedName
+  register: domain_dn
+  changed_when: false
+
+- name: Create Organizational Units
+  win_shell: |
+    Import-Module ActiveDirectory
+    $OUName = "{{ item.name }}"
+    $BaseDN = "{{ domain_dn.stdout.strip() }}"
+    
+    Write-Output "Checking for OU: $OUName in $BaseDN"
+    
+    try {
+      $OU = Get-ADOrganizationalUnit -Identity "OU=$OUName,$BaseDN" -ErrorAction Stop
+      Write-Output "OU $OUName already exists"
+    } catch {
+      Write-Output "Creating OU: $OUName"
+      New-ADOrganizationalUnit -Name $OUName -Path $BaseDN -ProtectedFromAccidentalDeletion $false
+      Write-Output "Created OU $OUName"
+    }
+  register: ou_creation
+  loop: "{{ organizational_units }}"
+  changed_when: "'Created OU' in ou_creation.stdout"
+
+- name: Create user password secure string file
+  win_shell: |
+    $SecurePassword = ConvertTo-SecureString "{{ user_password }}" -AsPlainText -Force
+    $SecurePassword | ConvertFrom-SecureString | Out-File C:\Automation\user_password.txt
+  no_log: true
+
+- name: Create domain users
+  win_shell: |
+    Import-Module ActiveDirectory
+    $Password = Get-Content C:\Automation\user_password.txt | ConvertTo-SecureString
+    
+    {% if item.ou == 'Users' %}
+    $OUPath = "CN=Users,{{ domain_dn.stdout.strip() }}"
+    {% else %}
+    $OUPath = "OU={{ item.ou }},{{ domain_dn.stdout.strip() }}"
+    {% endif %}
+    
+    try {
+      $User = Get-ADUser -Identity "{{ item.name }}" -ErrorAction Stop
+      Write-Output "User {{ item.name }} already exists"
+    } catch {
+      New-ADUser `
+        -Name "{{ item.name }}" `
+        -SamAccountName "{{ item.name }}" `
+        -UserPrincipalName "{{ item.name }}@{{ domain_name }}" `
+        -Path $OUPath `
+        -AccountPassword $Password `
+        -Enabled $true `
+        -PasswordNeverExpires $true `
+        -ChangePasswordAtLogon $false
+      Write-Output "Created user {{ item.name }}"
+    }
+  register: user_creation
+  loop: "{{ domain_users }}"
+  changed_when: "'Created user' in user_creation.stdout"
+
+- name: Add users to groups
+  win_shell: |
+    Import-Module ActiveDirectory
+    {% for group in item.groups %}
+    try {
+      $Member = Get-ADGroupMember -Identity "{{ group }}" | Where-Object { $_.SamAccountName -eq "{{ item.name }}" }
+      if (-not $Member) {
+        Add-ADGroupMember -Identity "{{ group }}" -Members "{{ item.name }}"
+        Write-Output "Added {{ item.name }} to {{ group }}"
+      } else {
+        Write-Output "{{ item.name }} already member of {{ group }}"
+      }
+    } catch {
+      Write-Output "Error adding {{ item.name }} to {{ group }}: $_"
+    }
+    {% endfor %}
+  register: group_membership
+  loop: "{{ domain_users }}"
+  when: item.groups is defined and item.groups | length > 0
+  changed_when: "'Added' in group_membership.stdout"
+
+- name: Verify AD structure
+  win_shell: |
+    Import-Module ActiveDirectory
+    
+    Write-Output "=== DOMAIN INFORMATION ==="
+    $Domain = Get-ADDomain
+    Write-Output "Domain: $($Domain.DNSRoot)"
+    Write-Output "Forest: $($Domain.Forest)"
+    
+    Write-Output "`n=== ORGANIZATIONAL UNITS ==="
+    Get-ADOrganizationalUnit -Filter * -SearchBase "{{ domain_dn.stdout.strip() }}" -SearchScope OneLevel | 
+      Select-Object Name, DistinguishedName | 
+      Format-Table -AutoSize | Out-String
+    
+    Write-Output "=== DOMAIN USERS ==="
+    Get-ADUser -Filter * -Properties MemberOf | 
+      Where-Object { $_.Name -ne "Administrator" -and $_.Name -ne "Guest" -and $_.Name -ne "krbtgt" } |
+      Select-Object Name, SamAccountName, Enabled, @{Name="Groups";Expression={($_.MemberOf | ForEach-Object { (Get-ADGroup $_).Name }) -join ", "}} |
+      Format-Table -AutoSize | Out-String
+  register: ad_verification
+
+- name: Log AD structure creation
+  win_shell: |
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $ouCount = {{ organizational_units | length }}
+    $userCount = {{ domain_users | length }}
+    Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] Active Directory structure created - OUs: $ouCount, Users: $userCount"
+
+- name: Save AD verification to file
+  win_shell: |
+    $content = @'
+    {{ ad_verification.stdout }}
+    '@
+    $content | Out-File "C:\Logs\ad_structure.txt" -Encoding UTF8
+
+- name: Clean up user password file
+  win_shell: |
+    if (Test-Path "C:\Automation\user_password.txt") {
+      Remove-Item "C:\Automation\user_password.txt" -Force
+      Write-Output "User password file removed"
+    }

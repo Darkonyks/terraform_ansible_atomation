@@ -1,0 +1,167 @@
+---
+# IIS Web Server installation and configuration
+# Author: Darko Nedic
+
+- name: Install IIS Windows Features
+  win_shell: |
+    Write-Output "Installing IIS Web Server and management tools..."
+    Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+    Write-Output "IIS installation completed"
+  register: iis_install
+
+- name: Ensure IIS service is running
+  win_service:
+    name: W3SVC
+    state: started
+    start_mode: auto
+
+- name: Create custom HTML content
+  win_shell: |
+    $deployDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $html = @"
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{{ server_name }} - Hello World</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                text-align: center;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 0;
+                margin: 0;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+            }
+            .container {
+                max-width: 800px;
+                padding: 40px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
+                backdrop-filter: blur(10px);
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            }
+            h1 {
+                font-size: 4em;
+                margin: 0 0 20px 0;
+                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+                animation: pulse 2s infinite;
+            }
+            @keyframes pulse {
+                0% { transform: scale(1); }
+                50% { transform: scale(1.05); }
+                100% { transform: scale(1); }
+            }
+            .subtitle {
+                font-size: 1.5em;
+                margin-bottom: 30px;
+                opacity: 0.9;
+            }
+            .info {
+                font-size: 1.1em;
+                margin: 10px 0;
+                padding: 10px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+            }
+            .tech-stack {
+                margin-top: 30px;
+                font-size: 0.9em;
+                opacity: 0.8;
+            }
+            .badge {
+                display: inline-block;
+                background: rgba(255, 255, 255, 0.2);
+                padding: 5px 15px;
+                margin: 5px;
+                border-radius: 20px;
+                font-size: 0.8em;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Hello World!</h1>
+            <div class="subtitle">DC Automation Completed Successfully</div>
+            
+            <div class="info">
+                <strong>Server:</strong> {{ server_name }}
+            </div>
+            <div class="info">
+                <strong>Domain:</strong> {{ domain_name }}
+            </div>          
+            <div class="tech-stack">
+                <div><strong>Technology Stack:</strong></div>
+                <span class="badge">Terraform</span>
+                <span class="badge">Ansible</span>
+                <span class="badge">AWS EC2</span>
+                <span class="badge">Windows Server 2016</span>
+                <span class="badge">Active Directory</span>
+                <span class="badge">IIS</span>
+            </div>
+        </div>
+    </body>
+    </html>
+    "@
+    
+    $html | Out-File "C:\inetpub\wwwroot\index.html" -Encoding UTF8
+  notify: restart iis
+
+- name: Remove default IIS files
+  win_shell: |
+    $files = @("C:\inetpub\wwwroot\iisstart.htm", "C:\inetpub\wwwroot\iisstart.png")
+    foreach ($file in $files) {
+      if (Test-Path $file) {
+        Remove-Item $file -Force
+        Write-Output "Removed: $file"
+      }
+    }
+  ignore_errors: yes
+
+- name: Configure IIS application pool
+  win_shell: |
+    Import-Module WebAdministration
+    Set-ItemProperty -Path "IIS:\AppPools\DefaultAppPool" -Name processModel.identityType -Value ApplicationPoolIdentity
+    Set-ItemProperty -Path "IIS:\AppPools\DefaultAppPool" -Name recycling.periodicRestart.time -Value "00:00:00"
+  ignore_errors: yes
+
+- name: Verify IIS installation
+  win_shell: |
+    $IISFeatures = Get-WindowsFeature | Where-Object { $_.Name -like "*IIS*" -and $_.InstallState -eq "Installed" }
+    Write-Output "Installed IIS Features: $($IISFeatures.Count)"
+    
+    $Service = Get-Service W3SVC
+    Write-Output "IIS Service Status: $($Service.Status)"
+    
+    if (Test-Path "C:\inetpub\wwwroot\index.html") {
+      Write-Output "Custom index.html: Present"
+    } else {
+      Write-Output "Custom index.html: Missing"
+    }
+    
+    try {
+      $Response = Invoke-WebRequest -Uri "http://localhost" -UseBasicParsing -TimeoutSec 10
+      Write-Output "HTTP Test: Success (Status: $($Response.StatusCode))"
+    } catch {
+      Write-Output "HTTP Test: Failed - $_"
+    }
+  register: iis_verification
+
+- name: Log IIS installation completion
+  win_shell: |
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $status = "{{ iis_verification.stdout_lines | join(' | ') }}"
+    Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] IIS installation completed - $status"
+
+- name: Save IIS verification to file
+  win_shell: |
+    $content = @'
+    {{ iis_verification.stdout }}
+    '@
+    $content | Out-File "C:\Logs\iis_status.txt" -Encoding UTF8

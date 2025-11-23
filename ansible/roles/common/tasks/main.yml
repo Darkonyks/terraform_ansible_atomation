@@ -1,0 +1,51 @@
+---
+# Common tasks for all servers
+# Author: Darko Nedic
+
+- name: Set PowerShell execution policy
+  win_shell: |
+    try {
+      Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Force -ErrorAction SilentlyContinue
+      Write-Output "Execution policy set successfully"
+    } catch {
+      Write-Output "Execution policy already configured or overridden by Group Policy"
+    }
+  failed_when: false
+  
+- name: Create automation directories
+  win_shell: |
+    $dirs = @("C:\Automation", "C:\Logs", "C:\Scripts")
+    foreach ($dir in $dirs) {
+      if (-not (Test-Path $dir)) {
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        Write-Output "Created: $dir"
+      } else {
+        Write-Output "Exists: $dir"
+      }
+    }
+
+- name: Configure Windows time service
+  win_shell: |
+    w32tm /config /manualpeerlist:"time.windows.com" /syncfromflags:manual /reliable:yes /update
+    w32tm /resync
+  ignore_errors: yes
+
+- name: Disable Windows Defender real-time protection (for performance)
+  win_shell: Set-MpPreference -DisableRealtimeMonitoring $true
+  ignore_errors: yes
+
+- name: Configure Windows Event Log sizes
+  win_shell: |
+    wevtutil sl System /ms:104857600
+    wevtutil sl Application /ms:104857600
+    wevtutil sl Security /ms:104857600
+  ignore_errors: yes
+
+- name: Set timezone to UTC
+  win_timezone:
+    timezone: UTC
+
+- name: Log common tasks completion
+  win_shell: |
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] Common configuration completed"

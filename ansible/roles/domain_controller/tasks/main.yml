@@ -1,0 +1,147 @@
+---
+# Domain Controller installation and configuration
+# Author: Darko Nedic
+
+- name: Check current computer name
+  win_shell: $env:COMPUTERNAME
+  register: current_hostname
+  changed_when: false
+
+- name: Rename computer if needed
+  win_hostname:
+    name: "{{ server_name }}"
+  register: hostname_result
+  when: current_hostname.stdout.strip() != server_name
+
+- name: Reboot after hostname change
+  win_reboot:
+    reboot_timeout: 600
+    post_reboot_delay: 30
+  when: hostname_result.changed
+
+- name: Wait for WinRM to be ready after hostname change
+  wait_for_connection:
+    connect_timeout: 20
+    sleep: 10
+    delay: 30
+    timeout: 300
+  when: hostname_result.changed
+
+- name: Verify hostname change was successful
+  win_shell: $env:COMPUTERNAME
+  register: verify_hostname
+  changed_when: false
+  when: hostname_result.changed
+
+- name: Display new hostname
+  debug:
+    msg: "Server hostname is now: {{ verify_hostname.stdout.strip() }}"
+  when: hostname_result.changed
+
+- name: Check if server is already a domain controller
+  win_shell: |
+    try {
+      $dcRole = Get-WindowsFeature -Name AD-Domain-Services
+      if ($dcRole.Installed -and (Get-Service -Name NTDS -ErrorAction SilentlyContinue)) {
+        Write-Output "true"
+      } else {
+        Write-Output "false"
+      }
+    } catch {
+      Write-Output "false"
+    }
+  register: is_domain_controller
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 10
+  until: is_domain_controller is succeeded
+
+- name: Install AD DS and DNS Windows Features
+  win_shell: |
+    Write-Output "Installing AD DS, DNS, and management tools..."
+    Install-WindowsFeature -Name AD-Domain-Services,DNS,RSAT-AD-PowerShell -IncludeManagementTools
+    Write-Output "Installation completed"
+  register: adds_install
+  when: is_domain_controller.stdout.strip() == "false"
+  retries: 2
+  delay: 15
+  until: adds_install is succeeded
+
+- name: Ensure Automation directory exists
+  win_shell: |
+    if (-not (Test-Path "C:\Automation")) {
+      New-Item -Path "C:\Automation" -ItemType Directory -Force | Out-Null
+    }
+  when: is_domain_controller.stdout.strip() == "false"
+
+- name: Promote server to Domain Controller
+  win_shell: |
+    $DSRMPassword = ConvertTo-SecureString "{{ dsrm_password }}" -AsPlainText -Force
+    
+    Write-Output "Starting DC promotion for domain: {{ domain_name }}"
+    Write-Output "This will take 10-15 minutes and the server will reboot..."
+    
+    Install-ADDSForest `
+      -DomainName "{{ domain_name }}" `
+      -DomainMode "WinThreshold" `
+      -ForestMode "WinThreshold" `
+      -InstallDns `
+      -SafeModeAdministratorPassword $DSRMPassword `
+      -Force `
+      -NoRebootOnCompletion:$false `
+      -Confirm:$false
+    
+    Write-Output "DC promotion completed successfully"
+  register: dc_promotion
+  when: is_domain_controller.stdout.strip() == "false"
+  async: 1800
+  poll: 30
+
+- name: Wait for server to reboot after DC promotion
+  wait_for_connection:
+    connect_timeout: 20
+    sleep: 5
+    delay: 60
+    timeout: 600
+  when: dc_promotion.changed
+
+- name: Wait for AD services to be ready
+  win_shell: |
+    $maxAttempts = 20
+    $attempt = 0
+    do {
+      $attempt++
+      try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Get-ADDomain -ErrorAction Stop | Out-Null
+        Write-Output "AD services are ready"
+        exit 0
+      } catch {
+        if ($attempt -eq $maxAttempts) {
+          Write-Output "AD services failed to start after $maxAttempts attempts"
+          exit 1
+        }
+        Write-Output "Attempt $attempt/$maxAttempts - AD services not ready, waiting..."
+        Start-Sleep -Seconds 30
+      }
+    } while ($attempt -lt $maxAttempts)
+  register: ad_ready
+  retries: 3
+  delay: 60
+  when: dc_promotion.changed or is_domain_controller.stdout.strip() == "false"
+
+- name: Verify Domain Controller status
+  win_shell: |
+    Import-Module ActiveDirectory
+    $domain = Get-ADDomain
+    Write-Output "Domain: $($domain.DNSRoot)"
+    Write-Output "Forest: $($domain.Forest)"
+    Write-Output "Domain Mode: $($domain.DomainMode)"
+  register: dc_status
+
+- name: Log Domain Controller installation completion
+  win_shell: |
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $status = "{{ dc_status.stdout_lines | join(' | ') }}"
+    Add-Content -Path "C:\Logs\ansible-build.log" -Value "[$timestamp] Domain Controller promotion completed - $status"
