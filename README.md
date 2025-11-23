@@ -1,4 +1,4 @@
-# 🚀 DC Automation - Complete Setup Guide
+# DC Automation - Complete Setup Guide
 
 **Automated Windows Server 2016 Domain Controller deployment on AWS EC2 using Terraform and Ansible**
 
